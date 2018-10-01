@@ -1,6 +1,7 @@
 package com.criteo.cuttle
 
-import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.{ExecutorService, Executors, ScheduledExecutorService, ThreadFactory}
 
 import scala.concurrent.ExecutionContext
 import scala.language.implicitConversions
@@ -13,8 +14,8 @@ object ThreadPools {
   }
 
   sealed trait Metrics {
-    protected var _threadPoolSize: Long = 0
-    def threadPoolSize(): Long = _threadPoolSize
+    protected var _threadPoolSize: AtomicInteger = new AtomicInteger(0)
+    def threadPoolSize(): Long = _threadPoolSize.get()
   }
 
   implicit def serverECToEC(ec: ServerThreadPool): ExecutionContext = ec.underlying
@@ -45,33 +46,50 @@ object ThreadPools {
     }
   }
 
+  def newThreadFactory(daemonThreads: Boolean = true,
+                       poolName: Option[String] = None,
+                       threadCounter: AtomicInteger = new AtomicInteger(0)): ThreadFactory =  new ThreadFactory() {
+    override def newThread(r: Runnable): Thread = {
+      val t = Executors.defaultThreadFactory.newThread(r)
+      t.setDaemon(daemonThreads)
+      poolName match {
+        case Some(name) =>
+          val threadCount = threadCounter.incrementAndGet()
+          t.setName(s"$name-$threadCount")
+        case None =>
+      }
+      t
+    }
+  }
+
+  /**
+    * @param daemonThreads set to true to create daemon threads (threads that do not prevent the JVM from exiting when the program finishes but the threads are still running)
+    * @param poolName optional parameter to identify the threads created by this thread pool
+    * @param threadCounter reference to a counter keeping track of the total number of threads created by this thread pool
+    */
+  def newFixedThreadPool(numThreads: Int, daemonThreads: Boolean = true, poolName: Option[String] = None, threadCounter: AtomicInteger = new AtomicInteger(0)): ExecutorService =
+    Executors.newFixedThreadPool(numThreads, newThreadFactory(daemonThreads, poolName, threadCounter))
+
+  /**
+    * @param daemonThreads set to true to create daemon threads (threads that do not prevent the JVM from exiting when the program finishes but the threads are still running)
+    * @param poolName optional parameter to identify the threads created by this thread pool
+    * @param threadCounter reference to a counter keeping track of the total number of threads created by this thread pool
+    */
+  def newScheduledThreadPool(numThreads: Int, daemonThreads: Boolean = true, poolName: Option[String] = None, threadCounter: AtomicInteger = new AtomicInteger(0)): ScheduledExecutorService =
+    Executors.newScheduledThreadPool(numThreads, newThreadFactory(daemonThreads, poolName, threadCounter))
+
   object Implicits {
     import ThreadPoolSystemProperties._
     implicit val serverThreadPool = new ServerThreadPool {
-      override val underlying = ExecutionContext.fromExecutorService(Executors.newFixedThreadPool(
-        fromSystemProperties(ServerECThreadCount, Runtime.getRuntime.availableProcessors),
-        utils.createThreadFactory(
-          (r: Runnable) => {
-            val t = Executors.defaultThreadFactory.newThread(r)
-            _threadPoolSize += 1
-            t.setDaemon(true)
-            t.setPriority(Thread.MAX_PRIORITY)
-            t
-          })
-      ))
+      override val underlying = ExecutionContext.fromExecutorService(
+        newFixedThreadPool(fromSystemProperties(ServerECThreadCount, Runtime.getRuntime.availableProcessors), poolName = Some("Server"), threadCounter = _threadPoolSize)
+      )
     }
 
     implicit val sideEffectThreadPool = new SideEffectThreadPool {
-      override val underlying = ExecutionContext.fromExecutorService(Executors.newFixedThreadPool(
-        fromSystemProperties(SideEffectECThreadCount, Runtime.getRuntime.availableProcessors),
-        utils.createThreadFactory(
-          (r: Runnable) => {
-            val t = Executors.defaultThreadFactory.newThread(r)
-            _threadPoolSize += 1
-            t.setDaemon(true)
-            t
-          })
-      ))
+      override val underlying = ExecutionContext.fromExecutorService(
+        newFixedThreadPool(fromSystemProperties(SideEffectECThreadCount, Runtime.getRuntime.availableProcessors), poolName = Some("SideEffect"), threadCounter = _threadPoolSize)
+      )
     }
   }
 }

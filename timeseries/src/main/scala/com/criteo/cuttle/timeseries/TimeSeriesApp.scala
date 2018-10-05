@@ -672,15 +672,14 @@ private[timeseries] case class TimeSeriesApp(project: CuttleProject, executor: E
         )
       }
 
-      watchState match {
-        case Some(watchedState) =>
-          if (request.headers.get(h"Accept").contains(h"text/event-stream"))
-            sse(IO { Some(watchedState) }, (s: WatchedState) => IO(getFocusView(s)))
-          else
-            Ok(getFocusView(watchedState))
-        case None =>
-          BadRequest
-      }
+      if (request.headers.get(h"Accept").contains(h"text/event-stream"))
+        sse(IO { watchState }, (s: WatchedState) => IO(getFocusView(s)))
+      else
+        watchState match {
+          case Some(watchedState) => Ok(getFocusView(watchedState))
+          case None => BadRequest
+        }
+
 
     case request @ GET at url"/api/timeseries/calendar?jobs=$jobs" =>
       val filteredJobs = Try(jobs.split(",").toSeq.filter(_.nonEmpty)).toOption
@@ -689,6 +688,9 @@ private[timeseries] case class TimeSeriesApp(project: CuttleProject, executor: E
         .toSet
 
       type WatchedState = ((TimeSeriesUtils.State, Set[Backfill]), Set[(Job[TimeSeries], TimeSeries#Context)])
+
+      case class JobStateOnPeriod(start: Instant, duration: Long, isDone: Boolean, isStuck: Boolean)
+
       def watchState: Option[WatchedState] = Some((scheduler.state, executor.allFailingJobsWithContext))
 
       def getCalendar(watchedState: WatchedState): Json = {
@@ -701,24 +703,32 @@ private[timeseries] case class TimeSeriesApp(project: CuttleProject, executor: E
               acc
           }
         val upToMidnightToday = Interval(Bottom, Finite(Daily(UTC).ceil(Instant.now)))
-        (for {
+        lazy val failingExecutionIds: Set[String] = executor.allFailingExecutions.map(_.id).toSet
+
+        val jobStatesOnPeriod: Set[JobStateOnPeriod] = for {
           job <- project.jobs.all
           if filteredJobs.contains(job.id)
           (interval, jobState) <- jobStates(job).intersect(upToMidnightToday).toList
           (start, end) <- Daily(UTC).split(interval)
-        } yield
-          (Daily(UTC).truncate(start), start.until(end, ChronoUnit.SECONDS), jobState == Done, jobState match {
-            case Running(exec) => executor.allFailingExecutions.exists(_.id == exec)
+        } yield JobStateOnPeriod(
+          Daily(UTC).truncate(start),
+          start.until(end, ChronoUnit.SECONDS),
+          jobState match {
+            case Done(_) => true
+            case _ => false
+          },
+          jobState match {
+            case Running(exec) => failingExecutionIds.contains(exec)
             case _             => false
-          }))
-          .groupBy(_._1)
+          })
+
+        jobStatesOnPeriod.groupBy { case JobStateOnPeriod(start, _, _, _) => start }
           .toList
-          .sortBy(_._1)
+          .sortBy { case (periodStart, _) => periodStart }
           .map {
-            case (date, set) =>
-              val (total, done, stuck) = set.foldLeft((0L, 0L, false)) { (acc, exec) =>
+            case (date, statesOnPeriod) =>
+              val (total, done, stuck) = statesOnPeriod.foldLeft((0L, 0L, false)) { case (acc, JobStateOnPeriod(_, duration, isDone, isStuck)) =>
                 val (totalDuration, doneDuration, isAnyStuck) = acc
-                val (_, duration, isDone, isStuck) = exec
                 val newDone = if (isDone) duration else 0L
                 (totalDuration + duration, doneDuration + newDone, isAnyStuck || isStuck)
               }
@@ -738,15 +748,13 @@ private[timeseries] case class TimeSeriesApp(project: CuttleProject, executor: E
 
       }
 
-      watchState match {
-        case Some(watchedState) =>
-          if (request.headers.get(h"Accept").contains(h"text/event-stream"))
-            sse(IO { Some(watchedState) }, (s: WatchedState) => IO.pure(getCalendar(s)))
-          else
-            Ok(getCalendar(watchedState))
-        case None =>
-          BadRequest
-      }
+      if (request.headers.get(h"Accept").contains(h"text/event-stream"))
+        sse(IO { watchState }, (s: WatchedState) => IO.pure(getCalendar(s)))
+      else
+        watchState match {
+          case Some(watchedState) => Ok(getCalendar(watchedState))
+          case None => BadRequest
+        }
 
     case GET at url"/api/timeseries/lastruns?job=$jobId" =>
       val (jobStates, backfills) = scheduler.state

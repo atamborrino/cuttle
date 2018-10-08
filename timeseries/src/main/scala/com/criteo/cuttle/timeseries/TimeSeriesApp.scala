@@ -523,7 +523,7 @@ private[timeseries] case class TimeSeriesApp(project: CuttleProject, executor: E
         .getOrElse(project.jobs.all.map(_.id))
         .toSet
 
-      def watchState: Option[WatchedState] = Some((scheduler.state, executor.allFailingJobsWithContext))
+      def watchState(): Option[WatchedState] = Some((scheduler.state, executor.allFailingJobsWithContext))
 
       def getFocusView(watchedState: WatchedState) = {
         val startDate = Instant.parse(start)
@@ -673,9 +673,9 @@ private[timeseries] case class TimeSeriesApp(project: CuttleProject, executor: E
       }
 
       if (request.headers.get(h"Accept").contains(h"text/event-stream"))
-        sse(IO { watchState }, (s: WatchedState) => IO(getFocusView(s)))
+        sse(IO { watchState() }, (s: WatchedState) => IO(getFocusView(s)))
       else
-        watchState match {
+        watchState() match {
           case Some(watchedState) => Ok(getFocusView(watchedState))
           case None => BadRequest
         }
@@ -691,7 +691,7 @@ private[timeseries] case class TimeSeriesApp(project: CuttleProject, executor: E
 
       case class JobStateOnPeriod(start: Instant, duration: Long, isDone: Boolean, isStuck: Boolean)
 
-      def watchState: Option[WatchedState] = Some((scheduler.state, executor.allFailingJobsWithContext))
+      def watchState(): Option[WatchedState] = Some((scheduler.state, executor.allFailingJobsWithContext))
 
       def getCalendar(watchedState: WatchedState): Json = {
         val ((jobStates, backfills), _) = watchedState
@@ -703,7 +703,6 @@ private[timeseries] case class TimeSeriesApp(project: CuttleProject, executor: E
               acc
           }
         val upToMidnightToday = Interval(Bottom, Finite(Daily(UTC).ceil(Instant.now)))
-        lazy val failingExecutionIds: Set[String] = executor.allFailingExecutions.map(_.id).toSet
 
         val jobStatesOnPeriod: Set[JobStateOnPeriod] = for {
           job <- project.jobs.all
@@ -718,7 +717,7 @@ private[timeseries] case class TimeSeriesApp(project: CuttleProject, executor: E
             case _ => false
           },
           jobState match {
-            case Running(exec) => failingExecutionIds.contains(exec)
+            case Running(exec) => executor.allFailingExecutions.exists(_.id == exec)
             case _             => false
           })
 
@@ -749,9 +748,9 @@ private[timeseries] case class TimeSeriesApp(project: CuttleProject, executor: E
       }
 
       if (request.headers.get(h"Accept").contains(h"text/event-stream"))
-        sse(IO { watchState }, (s: WatchedState) => IO.pure(getCalendar(s)))
+        sse(IO { watchState() }, (s: WatchedState) => IO.pure(getCalendar(s)))
       else
-        watchState match {
+        watchState() match {
           case Some(watchedState) => Ok(getCalendar(watchedState))
           case None => BadRequest
         }
